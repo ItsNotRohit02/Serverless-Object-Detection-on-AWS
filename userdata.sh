@@ -1,0 +1,211 @@
+#!/bin/bash
+
+yum update -y
+yum install httpd -y
+systemctl start httpd
+systemctl enable httpd
+
+# Create the index.html file at /var/www/html using heredoc
+cat <<'EOF' > /var/www/html/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Object Detection using Amazon Rekognition</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f4f4;
+        }
+
+        h2 {
+            color: #333;
+        }
+
+        #uploadForm {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .file-input {
+            padding: 10px;
+            font-size: 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        #progressContainer {
+            width: 100%;
+            background-color: #f0f0f0;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 20px;
+        }
+
+        #progressBar {
+            width: 0%;
+            height: 20px;
+            background-color: #28a745;
+            transition: width 0.4s ease;
+        }
+
+        #statusMessage {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #555;
+        }
+
+        #errorMessage {
+            color: red;
+        }
+    </style>
+</head>
+<body>
+
+<center><h2>Object Detection using Amazon Rekognition</h2></center>
+<form id="uploadForm">
+    <input type="file" id="imageFile" class="file-input" name="file" accept="image/*" required>
+    <button type="submit">Upload Image</button>
+    <p id="errorMessage"></p>
+</form>
+
+<!-- Progress Bar -->
+<div id="progressContainer" style="display: none;">
+    <div id="progressBar"></div>
+</div>
+
+<!-- Status Message -->
+<p id="statusMessage"></p>
+
+<script>
+document.getElementById('uploadForm').onsubmit = async function(event) {
+    event.preventDefault();
+
+    const submitButton = document.querySelector('button');
+    const fileInput = document.getElementById('imageFile');
+    const file = fileInput.files[0];
+
+    // File type validation (Only allow JPG, PNG, JPEG)
+    if (!['image/jpeg', 'image/png'].includes(file.type)) {
+        document.getElementById('errorMessage').innerText = "Unsupported file type. Only JPG and PNG allowed.";
+        return;
+    }
+
+    const uniqueFileName = `image_${Date.now()}_${Math.floor(Math.random() * 10000)}.jpeg`;
+
+    // Convert to JPEG if it's PNG or JPG
+    const convertedFile = await convertToJpeg(file);
+
+    submitButton.disabled = true;
+
+    const progressContainer = document.getElementById('progressContainer');
+    const progressBar = document.getElementById('progressBar');
+    const statusMessage = document.getElementById('statusMessage');
+    progressContainer.style.display = 'block';
+    statusMessage.textContent = "Uploading...";
+
+    try {
+        // Step 1: Request a presigned URL
+        const response = await fetch(`https://API-GATEWAY-URL/STAGE-NAME/RESOURCE?file_name=${uniqueFileName}`);
+        const data = await response.json();
+
+        if (data.presigned_url) {
+            const xhr = new XMLHttpRequest();
+            xhr.open('PUT', data.presigned_url, true);
+
+            xhr.upload.onprogress = function(event) {
+                if (event.lengthComputable) {
+                    const percentComplete = (event.loaded / event.total) * 100;
+                    progressBar.style.width = percentComplete + "%";
+                }
+            };
+
+            xhr.onload = function () {
+                if (xhr.status === 200) {
+                    progressBar.style.width = "100%";
+                    statusMessage.textContent = "File uploaded successfully!";
+                } else {
+                    statusMessage.textContent = "Failed to upload file.";
+                }
+                submitButton.disabled = false;
+            };
+
+            xhr.onerror = function () {
+                statusMessage.textContent = "An error occurred during the upload.";
+                submitButton.disabled = false;
+            };
+
+            xhr.send(convertedFile);
+        } else {
+            statusMessage.textContent = "Failed to get presigned URL.";
+            submitButton.disabled = false;
+        }
+    } catch (error) {
+        statusMessage.textContent = "An error occurred during the upload process.";
+        submitButton.disabled = false;
+    }
+};
+
+function convertToJpeg(file) {
+    return new Promise((resolve) => {
+        if (file.type === 'image/jpeg') {
+            resolve(file);
+        } else {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.src = e.target.result;
+                img.onload = function() {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+
+                    canvas.toBlob((blob) => {
+                        resolve(new File([blob], file.name, { type: 'image/jpeg' }));
+                    }, 'image/jpeg');
+                };
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+}
+</script>
+
+</body>
+</html>
+
+EOF
+
+# Set the appropriate permissions (optional)
+chown apache:apache /var/www/html/index.html
+chmod 644 /var/www/html/index.html

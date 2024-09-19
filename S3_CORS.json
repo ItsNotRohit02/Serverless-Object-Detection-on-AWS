@@ -1,0 +1,21 @@
+[
+    {
+        "AllowedHeaders": [
+            "Authorization",
+            "Content-Type",
+            "x-amz-security-token"
+        ],
+        "AllowedMethods": [
+            "PUT",
+            "POST",
+            "GET"
+        ],
+        "AllowedOrigins": [
+            "*"
+        ],
+        "ExposeHeaders": [
+            "ETag"
+        ],
+        "MaxAgeSeconds": 3000
+    }
+]

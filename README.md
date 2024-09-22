@@ -5,9 +5,9 @@
 This project involves building a cloud-based object detection system using AWS services. The system will allow users to upload images, process them using Amazon Rekognition, and store the detected labels in a DynamoDB table. The architecture leverages AWS Lambda, API Gateway, S3, EC2, and Auto Scaling to create a scalable and efficient solution.
 
 ## Architecture Diagram
-[Architecture Diagram](Architecture-Diagram.jpg)
+![Architecture Diagram](Architecture-Diagram.jpg)
 
-### Project Flow
+## Project Flow
 
 1. **User Interface**:
     
@@ -46,7 +46,7 @@ This project involves building a cloud-based object detection system using AWS s
     The project uses various IAM roles and policies to ensure that AWS services interact securely. This includes permissions for Lambda functions to access S3, Rekognition, DynamoDB, and CloudWatch Logs.
     
 
-### AWS CloudFormation Template Components
+## AWS CloudFormation Template Components
 
 - **Parameters**:
     - `VPCID`: VPC where resources will be launched.
@@ -73,7 +73,7 @@ This project involves building a cloud-based object detection system using AWS s
 - **Outputs**:
     - `ApiUrl`: URL of the API Gateway.
 
-### Deployment and Manual Configuration Steps
+## Deployment and Manual Configuration Steps
 
 1. **Deploy CloudFormation Stack**:
     

@@ -1,0 +1,627 @@
+---
+Parameters:
+  VPCID:
+    Type: AWS::EC2::VPC::Id
+    Description: The ID of the VPC to launch resources into.
+  
+  SubnetIds:
+    Description: Comma-separated list of Subnet IDs for the Auto Scaling Group.
+    Type: List<AWS::EC2::Subnet::Id>
+
+Resources:
+  ImageS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties: 
+      #BucketName: image-bucket-2312 #Commented out so that AWS assigns unique name
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - '*'
+            AllowedMethods:
+              - PUT
+              - POST
+              - GET
+            AllowedHeaders:
+              - 'Authorization'
+              - 'Content-Type'
+              - 'x-amz-security-token'
+            ExposedHeaders:
+              - 'ETag'
+            MaxAge: 3000
+
+      # NotificationConfiguration:
+      #   LambdaConfigurations:
+      #     - Event: 's3:ObjectCreated:*'
+      #       Function: !GetAtt LambdaRekognitionLabels.Arn
+              
+#To avoid circular dependency the S3 Bucket Event Notification must be setup manually after the stack has been initialized.
+#The circular dependency was between ImageS3Bucket, LambdaRekognitionIAMRole, LambdaRekognitionLabels and LambdaPermissionForS3.
+
+  LabelsDynamoDBTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: ImageLabelsTable
+      AttributeDefinitions:
+        - AttributeName: ImageName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ImageName
+          KeyType: HASH
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 3
+        WriteCapacityUnits: 3
+
+
+  LambdaPreSignedURL:
+    Type: 'AWS::Lambda::Function'
+    Properties: 
+      FunctionName: Pre-signed-URL
+      Architectures: 
+        - x86_64
+      MemorySize: 128
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaPreSignedIAMRole.Arn
+      Runtime: python3.12
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ImageS3Bucket
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          s3 = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              bucket_name = os.environ['BUCKET_NAME']
+              key = event['queryStringParameters']['file_name']
+
+              presigned_url = s3.generate_presigned_url(
+                  'put_object',
+                  Params={
+                      'Bucket': bucket_name,
+                      'Key': key,
+                      'ContentType': 'image/jpeg'
+                  },
+                  ExpiresIn=600
+              )
+              
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({"presigned_url": presigned_url}),
+                  "headers": {
+                      "Content-Type": "application/json",
+                      "Access-Control-Allow-Origin": "*", 
+                      "Access-Control-Allow-Methods": "GET, OPTIONS",
+                      "Access-Control-Allow-Headers": "Content-Type"
+                  }
+              }
+
+
+  LambdaRekognitionLabels:
+    Type: 'AWS::Lambda::Function'
+    Properties: 
+      FunctionName: Rekognition-Labels
+      Architectures: 
+        - x86_64
+      MemorySize: 128
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRekognitionIAMRole.Arn
+      Runtime: python3.12
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref LabelsDynamoDBTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          s3_client = boto3.client('s3')
+          rekognition_client = boto3.client('rekognition')
+          dynamodb = boto3.resource('dynamodb')
+
+          TABLE_NAME = os.environ['TABLE_NAME']
+
+          def lambda_handler(event, context):
+              bucket_name = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+
+              response = rekognition_client.detect_labels(
+                  Image={
+                      'S3Object': {
+                          'Bucket': bucket_name,
+                          'Name': object_key
+                      }
+                  },
+                  MaxLabels=10,
+                  MinConfidence=75
+              )
+
+              labels = [label['Name'] for label in response['Labels']]
+
+              labels += [None] * (10 - len(labels))
+
+              dynamodb_item = {
+                  'ImageName': object_key,
+                  'Label1': labels[0],
+                  'Label2': labels[1],
+                  'Label3': labels[2],
+                  'Label4': labels[3],
+                  'Label5': labels[4],
+                  'Label6': labels[5],
+                  'Label7': labels[6],
+                  'Label8': labels[7],
+                  'Label9': labels[8]
+              }
+
+              table = dynamodb.Table(TABLE_NAME)
+              table.put_item(Item=dynamodb_item)
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(f"Labels for {object_key} inserted into DynamoDB.")
+              }
+
+
+  MyApiGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: MyApiGateway
+
+  ApiGatewayResourceUpload:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId:
+        Fn::GetAtt:
+          - MyApiGatewayRestApi
+          - RootResourceId
+      PathPart: upload
+      RestApiId:
+        Ref: MyApiGatewayRestApi
+
+  ApiGatewayMethodUploadGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      ResourceId:
+        Ref: ApiGatewayResourceUpload
+      RestApiId:
+        Ref: MyApiGatewayRestApi
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri:
+          Fn::Sub:
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaPreSignedURL.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+
+  ApiGatewayCORS:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      ResourceId:
+        Ref: ApiGatewayResourceUpload
+      RestApiId:
+        Ref: MyApiGatewayRestApi
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ApiGatewayDeploymentProd:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: 
+        Ref: MyApiGatewayRestApi
+      StageName: prod
+    DependsOn: 
+      - ApiGatewayMethodUploadGet
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: 
+        Ref: LambdaPreSignedURL
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: 
+          arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGatewayRestApi}/*/GET/upload
+
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: EC2-SG
+      GroupDescription: Security group for EC2 allowing HTTP/HTTPS access from anywhere
+      VpcId: !Ref VPCID
+      SecurityGroupIngress: 
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: ALB-SG
+      GroupDescription: Security group for ALB allowing HTTP/HTTPS access from anywhere and SSH from a specific IP
+      VpcId: !Ref VPCID
+      SecurityGroupIngress: 
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0  # Replace with your IP
+
+
+  MyLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties: 
+      LaunchTemplateData:
+        InstanceType: t2.micro
+        ImageId: ami-0ebfd941bbafe70c6 # Replace with Amazon Linux 2023 AMI ID for your region
+        KeyName: keypair # Replace with your key pair name
+        SecurityGroupIds: 
+          - !Ref ALBSecurityGroup
+        UserData:
+          Fn::Base64: |
+              #!/bin/bash
+
+              yum update -y
+              yum install httpd -y
+              systemctl start httpd
+              systemctl enable httpd
+
+              # Create the index.html file at /var/www/html using heredoc
+              cat <<'EOF' > /var/www/html/index.html
+              <!DOCTYPE html>
+              <html lang="en">
+              <head>
+                  <meta charset="UTF-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                  <title>Object Detection using Amazon Rekognition</title>
+                  <style>
+                      body {
+                          font-family: Arial, sans-serif;
+                          margin: 0;
+                          padding: 20px;
+                          background-color: #f4f4f4;
+                      }
+
+                      h2 {
+                          color: #333;
+                      }
+
+                      #uploadForm {
+                          display: flex;
+                          flex-direction: column;
+                          align-items: flex-start;
+                          background-color: #fff;
+                          padding: 20px;
+                          border-radius: 8px;
+                          box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+                      }
+
+                      .file-input {
+                          padding: 10px;
+                          font-size: 16px;
+                          background-color: #007bff;
+                          color: white;
+                          border: none;
+                          border-radius: 5px;
+                          cursor: pointer;
+                          margin-bottom: 10px;
+                      }
+
+                      button {
+                          padding: 10px 20px;
+                          background-color: #28a745;
+                          color: white;
+                          border: none;
+                          border-radius: 5px;
+                          cursor: pointer;
+                          font-size: 16px;
+                      }
+
+                      button:disabled {
+                          background-color: #ccc;
+                          cursor: not-allowed;
+                      }
+
+                      #progressContainer {
+                          width: 100%;
+                          background-color: #f0f0f0;
+                          border-radius: 5px;
+                          overflow: hidden;
+                          margin-top: 20px;
+                      }
+
+                      #progressBar {
+                          width: 0%;
+                          height: 20px;
+                          background-color: #28a745;
+                          transition: width 0.4s ease;
+                      }
+
+                      #statusMessage {
+                          margin-top: 10px;
+                          font-size: 14px;
+                          color: #555;
+                      }
+
+                      #errorMessage {
+                          color: red;
+                      }
+                  </style>
+              </head>
+              <body>
+
+              <center><h2>Object Detection using Amazon Rekognition</h2></center>
+              <form id="uploadForm">
+                  <input type="file" id="imageFile" class="file-input" name="file" accept="image/*" required>
+                  <button type="submit">Upload Image</button>
+                  <p id="errorMessage"></p>
+              </form>
+
+              <!-- Progress Bar -->
+              <div id="progressContainer" style="display: none;">
+                  <div id="progressBar"></div>
+              </div>
+
+              <!-- Status Message -->
+              <p id="statusMessage"></p>
+
+              <script>
+              document.getElementById('uploadForm').onsubmit = async function(event) {
+                  event.preventDefault();
+
+                  const submitButton = document.querySelector('button');
+                  const fileInput = document.getElementById('imageFile');
+                  const file = fileInput.files[0];
+
+                  // File type validation (Only allow JPG, PNG, JPEG)
+                  if (!['image/jpeg', 'image/png', 'image/jpg'].includes(file.type)) {
+                      document.getElementById('errorMessage').innerText = "Unsupported file type. Only JPG and PNG allowed.";
+                      return;
+                  }
+
+                  const uniqueFileName = `image_${Date.now()}_${Math.floor(Math.random() * 10000)}.jpeg`;
+
+                  // Convert to JPEG if it's PNG or JPG
+                  const convertedFile = await convertToJpeg(file);
+
+                  submitButton.disabled = true;
+
+                  const progressContainer = document.getElementById('progressContainer');
+                  const progressBar = document.getElementById('progressBar');
+                  const statusMessage = document.getElementById('statusMessage');
+                  progressContainer.style.display = 'block';
+                  statusMessage.textContent = "Uploading...";
+
+                  try {
+                      // Step 1: Request a presigned URL
+                      const response = await fetch(`https://nb034x8jla.execute-api.us-east-1.amazonaws.com/prod/upload?file_name=${uniqueFileName}`); //Change based on your API URL
+                      const data = await response.json();
+
+                      if (data.presigned_url) {
+                          const xhr = new XMLHttpRequest();
+                          xhr.open('PUT', data.presigned_url, true);
+
+                          xhr.upload.onprogress = function(event) {
+                              if (event.lengthComputable) {
+                                  const percentComplete = (event.loaded / event.total) * 100;
+                                  progressBar.style.width = percentComplete + "%";
+                              }
+                          };
+
+                          xhr.onload = function () {
+                              if (xhr.status === 200) {
+                                  progressBar.style.width = "100%";
+                                  statusMessage.textContent = "File uploaded successfully!";
+                              } else {
+                                  statusMessage.textContent = "Failed to upload file.";
+                              }
+                              submitButton.disabled = false;
+                          };
+
+                          xhr.onerror = function () {
+                              statusMessage.textContent = "An error occurred during the upload.";
+                              submitButton.disabled = false;
+                          };
+
+                          xhr.send(convertedFile);
+                      } else {
+                          statusMessage.textContent = "Failed to get presigned URL.";
+                          submitButton.disabled = false;
+                      }
+                  } catch (error) {
+                      statusMessage.textContent = "An error occurred during the upload process.";
+                      submitButton.disabled = false;
+                  }
+              };
+
+              function convertToJpeg(file) {
+                  return new Promise((resolve) => {
+                      if (file.type === 'image/jpeg') {
+                          resolve(file);
+                      } else {
+                          const reader = new FileReader();
+                          reader.onload = function(e) {
+                              const img = new Image();
+                              img.src = e.target.result;
+                              img.onload = function() {
+                                  const canvas = document.createElement('canvas');
+                                  canvas.width = img.width;
+                                  canvas.height = img.height;
+
+                                  const ctx = canvas.getContext('2d');
+                                  ctx.drawImage(img, 0, 0);
+
+                                  canvas.toBlob((blob) => {
+                                      resolve(new File([blob], file.name, { type: 'image/jpeg' }));
+                                  }, 'image/jpeg');
+                              };
+                          };
+                          reader.readAsDataURL(file);
+                      }
+                  });
+              }
+              </script>
+
+              </body>
+              </html>
+
+              EOF
+
+              # Set the appropriate permissions (optional)
+              chown apache:apache /var/www/html/index.html
+              chmod 644 /var/www/html/index.html
+
+      LaunchTemplateName: MyWebAppLaunchTemplate
+
+  MyAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: MyWebAppAutoScalingGroup
+      VPCZoneIdentifier: !Ref SubnetIds
+      LaunchTemplate:
+        LaunchTemplateId: !Ref MyLaunchTemplate
+        Version: !GetAtt MyLaunchTemplate.LatestVersionNumber
+      MinSize: '1'
+      MaxSize: '3'
+      DesiredCapacity: '1'
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: WebAppInstance
+          PropagateAtLaunch: true
+
+  ScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref MyAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50.0
+
+
+  LambdaPermissionForS3:
+    Type: 'AWS::Lambda::Permission'
+    Properties: 
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref LambdaRekognitionLabels
+      Principal: 's3.amazonaws.com'
+      SourceArn: !GetAtt ImageS3Bucket.Arn
+
+  LambdaPreSignedIAMRole:
+      Type: "AWS::IAM::Role"
+      Properties: 
+        AssumeRolePolicyDocument: 
+          Version: "2012-10-17"
+          Statement: 
+            - Effect: "Allow"
+              Principal: 
+                Service: "lambda.amazonaws.com"
+              Action: "sts:AssumeRole"
+        Policies: 
+          - PolicyName: "S3AndCloudWatchPolicy"
+            PolicyDocument: 
+              Version: "2012-10-17"
+              Statement: 
+                - Sid: "VisualEditor0"
+                  Effect: "Allow"
+                  Action: "s3:PutObject"
+                  Resource: !Sub "${ImageS3Bucket.Arn}/*"
+                - Effect: "Allow"
+                  Action: "logs:CreateLogGroup"
+                  Resource: "arn:aws:logs:*:*:*"
+                - Effect: "Allow"
+                  Action: 
+                    - "logs:CreateLogStream"
+                    - "logs:PutLogEvents"
+                  Resource: 
+                    - "arn:aws:logs:*:*:*"
+
+
+  LambdaRekognitionIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: LambdaRekognitionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RekognitionPermissions
+                Effect: Allow
+                Action: "rekognition:*"
+                Resource: "*"
+              - Sid: S3AndDynamoDBPermissions
+                Effect: Allow
+                Action: 
+                  - "s3:GetObject"
+                  - "dynamodb:PutItem"
+                Resource: 
+                  - !GetAtt LabelsDynamoDBTable.Arn
+                  - !Sub "${ImageS3Bucket.Arn}/*"
+              - Sid: CloudWatchLogsPermissions
+                Effect: Allow
+                Action: "logs:CreateLogGroup"
+                Resource: "arn:aws:logs:*:*:*"
+              - Sid: LambdaLogsPermissions
+                Effect: Allow
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: 
+                  - "arn:aws:logs:*:*:*"
+
+Outputs:
+  ApiUrl:
+    Description: "URL of the API Gateway"
+    Value:
+      Fn::Sub: 
+        https://${MyApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/upload

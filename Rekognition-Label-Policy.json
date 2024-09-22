@@ -1,23 +1,40 @@
 {
-	"Version": "2012-10-17",
-	"Statement": [
-		{
-			"Sid": "VisualEditor0",
-			"Effect": "Allow",
-			"Action": "rekognition:*",
-			"Resource": "*"
-		},
-		{
-			"Sid": "VisualEditor1",
-			"Effect": "Allow",
-			"Action": [
-				"s3:GetObject",
-				"dynamodb:PutItem"
-			],
-			"Resource": [
-				"arn:aws:dynamodb:us-east-1:843576970817:table/ImageLabelsTable",
-				"arn:aws:s3:::image-bucket-2312/*"
-			]
-		}
-	]
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "RekognitionPermissions",
+            "Effect": "Allow",
+            "Action": "rekognition:*",
+            "Resource": "*"
+        },
+        {
+            "Sid": "S3AndDynamoDBPermissions",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "dynamodb:PutItem"
+            ],
+            "Resource": [
+                "arn:aws:dynamodb:us-east-1:843576970817:table/ImageLabelsTable",
+                "arn:aws:s3:::image-bucket-2312/*"
+            ]
+        },
+        {
+            "Sid": "CloudWatchLogsPermissions",
+            "Effect": "Allow",
+            "Action": "logs:CreateLogGroup",
+            "Resource": "arn:aws:logs:us-east-1:843576970817:*"
+        },
+        {
+            "Sid": "LambdaLogsPermissions",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": [
+                "arn:aws:logs:us-east-1:843576970817:log-group:/aws/lambda/lambda:*"
+            ]
+        }
+    ]
 }
